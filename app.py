@@ -82,7 +82,7 @@ def build_database_config():
 
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-production")
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
 app.config["SQLALCHEMY_DATABASE_URI"], app.config["SQLALCHEMY_ENGINE_OPTIONS"] = build_database_config()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
@@ -148,7 +148,7 @@ UNIQUE_NAME = "uq_tree_location"
 # Database model
 # ---------------------------------------------------------------------------
 class Shisham(db.Model):
-    __tablename__ = "shisham"
+    __tablename__ = "trees"
 
     id = db.Column(db.Integer, primary_key=True)
     tree_no = db.Column(db.String(50), nullable=False)

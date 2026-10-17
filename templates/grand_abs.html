@@ -1,0 +1,48 @@
+{% if sections|length > 1 %}
+      <section class="card grand">
+        <h2>Grand abstract: all beats</h2>
+        <p class="sub">Every beat added together.</p>
+        <div class="grand-grid">
+          <table class="ledger">
+            <thead>
+              <tr><th>No. of trees</th><th>Kind</th><th class="num">CFT</th><th class="num">Shi unit</th></tr>
+            </thead>
+            <tbody>
+              {% for r in grand.rows %}
+              <tr>
+                <td>{{ r.trees }}</td><td>{{ r.kind|capitalize }}</td>
+                <td class="num">{{ '%.2f'|format(r.cft) }}</td><td class="num">{{ '%.2f'|format(r.shi_unit) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>{{ grand.trees }}</td><td>Total</td>
+                <td class="num">{{ '%.2f'|format(grand.cft) }}</td><td class="num">{{ '%.2f'|format(grand.shi_unit) }}</td>
+              </tr>
+            </tfoot>
+          </table>
+
+          <table class="ledger">
+            <thead>
+              <tr><th>No. of trees</th><th>Beat</th><th class="num">CFT</th><th class="num">Shi unit</th></tr>
+            </thead>
+            <tbody>
+              {% for s in sections|sort(attribute='beat') %}
+              <tr>
+                <td>{{ s.abstract.trees }}</td><td>{{ s.beat }}</td>
+                <td class="num">{{ '%.2f'|format(s.abstract.cft) }}</td><td class="num">{{ '%.2f'|format(s.abstract.shi_unit) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>{{ grand.trees }}</td><td>Total</td>
+                <td class="num">{{ '%.2f'|format(grand.cft) }}</td><td class="num">{{ '%.2f'|format(grand.shi_unit) }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    </section>

@@ -83,7 +83,7 @@ def build_database_config():
 
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-production")
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
 app.config["SQLALCHEMY_DATABASE_URI"], app.config["SQLALCHEMY_ENGINE_OPTIONS"] = build_database_config()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 

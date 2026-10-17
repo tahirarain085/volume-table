@@ -84,7 +84,12 @@ def build_database_config():
 
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+## app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY is not set. Add it to .env or to Render > Environment.")
+app.config["SECRET_KEY"] = SECRET_KEY
 app.config["SQLALCHEMY_DATABASE_URI"], app.config["SQLALCHEMY_ENGINE_OPTIONS"] = build_database_config()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 

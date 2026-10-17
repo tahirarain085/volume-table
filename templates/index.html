@@ -221,11 +221,11 @@
         {% if edit_tree %}
           <div class="editing-note">Editing tree no <strong>{{ edit_tree.tree_no }}</strong>. Dia, cft and shi unit are updated from the girth and kind.</div>
         {% endif %}
-        <form method="POST" id="tree-form"{% if edit_tree %} action="{{ url_for('update_tree', tree_id=edit_tree.id) }}"{% endif %}>
+        <form method="POST" id="tree-form"{% if edit_tree %} action="{{ url_for('update_tree', beat_id=edit_beat.id, tree_id=edit_tree.id) }}"{% endif %}>
           {% if edit_tree %}
           <div class="field">
             <label for="edit_beat">Beat</label>
-            <input type="text" id="edit_beat" name="beat_name" list="beat-list" maxlength="100"
+            <input type="text"  name="beat_name" list="beat-list" maxlength="100"
                    value="{{ form.get('beat_name', edit_tree.beat_name) }}" required>
           </div>
           {% endif %}
@@ -313,7 +313,7 @@
             </thead>
             <tbody>
               {% for t in s.trees %}
-              <tr{% if edit_tree and edit_tree.id == t.id %} class="editing"{% endif %}>
+              <tr {% if edit_tree and edit_beat and edit_beat.id == s.id and edit_tree.id == t.id %} class="editing"{% endif %}>
                 <td>{{ t.id }}</td>
                 <td>{{ t.tree_no }}</td>
                 <td>{{ t.km_burji_no }}</td>
@@ -325,8 +325,8 @@
                 <td class="remarks">{{ t.remarks or '' }}</td>
                 <td>
                   <div class="actions">
-                    <a class="mini" href="{{ url_for('index', edit=t.id) }}#tree-card">Edit</a>
-                    <form method="POST" action="{{ url_for('delete_tree', tree_id=t.id) }}"
+                    <a class="mini" href="{{ url_for('index', edit=t.id, beat=s.id) }}#tree-card">Edit</a>
+                    <form method="POST" action="{{ url_for('delete_tree', beat_id=s.id, tree_id=t.id) }}"
                           data-confirm="Delete tree no {{ t.tree_no }} ({{ t.kind_tree|capitalize }}, km / RD / burji no {{ t.km_burji_no }})? This cannot be undone.">
                       <button type="submit" class="mini danger">Delete</button>
                     </form>

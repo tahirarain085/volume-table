@@ -1,0 +1,7 @@
+.env
+ca.pem
+trees_local.db
+env/
+.venv/
+__pycache__/
+*.pyc

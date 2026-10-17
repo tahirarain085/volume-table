@@ -192,7 +192,7 @@
         {% if current_beat %}
           <p class="beat-now">Entering trees for<strong>{{ current_beat }}</strong></p>
         {% endif %}
-        <form method="POST" action="{{ url_for('set_beat') }}">
+        <form method="GET" action="{{ url_for('set_beat') }}">
           <div class="field">
             <label for="beat_name">{{ 'Switch to another beat' if current_beat else 'Beat name' }}</label>
             <input type="text" id="beat_name" name="beat_name" list="beat-list" maxlength="100"
@@ -368,7 +368,7 @@
 
       <!-- Grand abstract, only useful when there is more than one beat -->
        
-      
+      </section>
   </main>
 
   <script>

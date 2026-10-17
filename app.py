@@ -22,7 +22,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Border, Font, Side
 from sqlalchemy import func, inspect, text
 from sqlalchemy.exc import IntegrityError, OperationalError
-
+from markupsafe import escape
+from werkzeug.exceptions import HTTPException
 from volume_data import RANGES
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -679,6 +680,15 @@ def database_unreachable(exc):
     from flask import render_template_string
     detail = str(exc.orig) if getattr(exc, "orig", None) else str(exc)
     return render_template_string(DB_ERROR_PAGE, detail=detail[:300]), 503
+@app.errorhandler(Exception)
+def show_error(exc):
+    if isinstance(exc, HTTPException):
+        return exc
+    db.session.rollback()
+    app.logger.exception("Unhandled error")
+    if os.getenv("SHOW_ERRORS") == "1":
+        return f"<h1>Error</h1><pre>{escape(exc.__class__.__name__)}: {escape(str(exc)[:500])}</pre>", 500
+    return "Internal Server Error", 500
 
 
 @app.route("/health/db")

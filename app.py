@@ -7,6 +7,7 @@ import os
 import re
 import ssl
 import tempfile
+import uuid
 from collections import defaultdict
 from datetime import datetime
 from io import BytesIO
@@ -82,7 +83,7 @@ def build_database_config():
 
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "change-me-in-production")
 app.config["SQLALCHEMY_DATABASE_URI"], app.config["SQLALCHEMY_ENGINE_OPTIONS"] = build_database_config()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
@@ -132,51 +133,87 @@ KINDS = sorted({kind for kind, _ in VOLUME_TABLE})
 # Tree no rule
 # The same tree no CAN be used again in another km / RD no (or another beat),
 # but it can NOT be saved twice in the same km / RD no of the same beat.
+# (Every beat has its own table, so the rule is checked inside that table.)
 # Set TREE_NO_UNIQUE_PER_KIND = True if the same tree no may also be used once
 # for each kind (for example shisham 14 and kikar 14) in the same km / RD no.
 # ---------------------------------------------------------------------------
 TREE_NO_UNIQUE_PER_KIND = False
-UNIQUE_COLUMNS = (
-    ["beat_name", "km_burji_no"]
-    + (["kind_tree"] if TREE_NO_UNIQUE_PER_KIND else [])
-    + ["tree_no"]
-)
-UNIQUE_NAME = "uq_tree_location"
+UNIQUE_COLUMNS = ["km_burji_no"] + (["kind_tree"] if TREE_NO_UNIQUE_PER_KIND else []) + ["tree_no"]
 
 
 # ---------------------------------------------------------------------------
-# Database model
+# One table per beat
+#   "beats"                       : the list of beats (id, name, table_name)
+#   "beat_<id>_<name>"            : one table per beat, holds only that beat's trees
+# Table names are built from the beat's number and letters a-z / 0-9 only,
+# never from raw text, so a beat name can not break the SQL.
 # ---------------------------------------------------------------------------
-class Shisham(db.Model):
-    __tablename__ = "trees"
+class Beat(db.Model):
+    __tablename__ = "beats"
 
     id = db.Column(db.Integer, primary_key=True)
-    tree_no = db.Column(db.String(50), nullable=False)
-    beat_name = db.Column(db.String(100), nullable=False)
-    km_burji_no = db.Column(db.String(50), nullable=False)
-    kind_tree = db.Column(db.String(100), nullable=False)
-    girth = db.Column(db.Integer, nullable=False)
-    dia = db.Column(db.Integer)
-    cft = db.Column(db.Float)
-    shi_unit = db.Column(db.Float)
-    remarks = db.Column(db.String(255))
+    name = db.Column(db.String(100), nullable=False, unique=True)
+    table_name = db.Column(db.String(80), nullable=False, unique=True)
 
-    # Duplicate rule: see UNIQUE_COLUMNS above.
-    __table_args__ = (db.UniqueConstraint(*UNIQUE_COLUMNS, name=UNIQUE_NAME),)
 
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "tree_no": self.tree_no,
-            "beat_name": self.beat_name,
-            "km_burji_no": self.km_burji_no,
-            "kind_tree": self.kind_tree,
-            "girth": self.girth,
-            "dia": self.dia,
-            "cft": self.cft,
-            "shi_unit": self.shi_unit,
-            "remarks": self.remarks,
+_tree_models = {}
+
+
+def tree_model(table_name):
+    """Return the model class for one beat's table (made once, then reused)."""
+    model = _tree_models.get(table_name)
+    if model is None:
+        attrs = {
+            "__tablename__": table_name,
+            "__table_args__": (db.UniqueConstraint(*UNIQUE_COLUMNS, name=f"uq_{table_name}"),),
+            "id": db.Column(db.Integer, primary_key=True),
+            "tree_no": db.Column(db.String(50), nullable=False),
+            "km_burji_no": db.Column(db.String(50), nullable=False),
+            "kind_tree": db.Column(db.String(100), nullable=False),
+            "girth": db.Column(db.Integer, nullable=False),
+            "dia": db.Column(db.Integer),
+            "cft": db.Column(db.Float),
+            "shi_unit": db.Column(db.Float),
+            "remarks": db.Column(db.String(255)),
+            "to_dict": lambda self: {c.name: getattr(self, c.name) for c in self.__table__.columns},
         }
+        model = type(f"Trees_{table_name}", (db.Model,), attrs)
+        _tree_models[table_name] = model
+    return model
+
+
+def _slug(name):
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+
+
+def get_beat(name):
+    return Beat.query.filter_by(name=name).first()
+
+
+def ensure_table(beat):
+    try:
+        tree_model(beat.table_name).__table__.create(db.engine, checkfirst=True)
+    except Exception as exc:  # another worker may have created it a moment earlier
+        if not inspect(db.engine).has_table(beat.table_name):
+            raise exc
+
+
+def get_or_create_beat(name):
+    """Find the beat, or register it and create its own table."""
+    beat = get_beat(name)
+    if beat is None:
+        try:
+            beat = Beat(name=name, table_name="pending_" + uuid.uuid4().hex[:12])
+            db.session.add(beat)
+            db.session.flush()
+            slug = _slug(name)
+            beat.table_name = f"beat_{beat.id}" + (f"_{slug}" if slug else "")
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            beat = get_beat(name)
+    ensure_table(beat)
+    return beat
 
 
 def duplicate_message(tree_no, kind_tree, km_burji_no, beat):
@@ -193,9 +230,8 @@ def duplicate_message(tree_no, kind_tree, km_burji_no, beat):
 
 
 def get_beat_options():
-    """Beats from the BEATS list plus every beat name already saved."""
-    saved = db.session.query(Shisham.beat_name).distinct().all()
-    names = set(BEATS) | {name for (name,) in saved if name}
+    """Beats from the BEATS list plus every beat already registered."""
+    names = set(BEATS) | {name for (name,) in db.session.query(Beat.name).all()}
     return sorted(names, key=str.lower)
 
 
@@ -234,25 +270,25 @@ def _finish_abstract(a):
 
 
 def get_abstracts(only_beat=None):
-    """Returns ({beat: abstract}, grand_abstract). Uses ALL saved entries."""
-    query = db.session.query(
-        Shisham.beat_name,
-        Shisham.kind_tree,
-        func.count(Shisham.id),
-        func.coalesce(func.sum(Shisham.cft), 0),
-        func.coalesce(func.sum(Shisham.shi_unit), 0),
-    )
-    if only_beat:
-        query = query.filter(Shisham.beat_name == only_beat)
-    query = query.group_by(Shisham.beat_name, Shisham.kind_tree)
-
+    """Returns ({beat name: abstract}, grand_abstract). Beats with no trees are left out."""
+    beats = Beat.query.filter_by(name=only_beat).all() if only_beat else Beat.query.all()
     per_beat, grand = {}, _new_abstract()
-    for beat, kind, trees, cft, shi_unit in query.all():
-        cft, shi_unit = float(cft), float(shi_unit)
-        _add_to_abstract(per_beat.setdefault(beat, _new_abstract()), kind, trees, cft, shi_unit)
-        _add_to_abstract(grand, kind, trees, cft, shi_unit)
-
-    return {b: _finish_abstract(a) for b, a in per_beat.items()}, _finish_abstract(grand)
+    for beat in beats:
+        Tree = tree_model(beat.table_name)
+        rows = db.session.query(
+            Tree.kind_tree,
+            func.count(Tree.id),
+            func.coalesce(func.sum(Tree.cft), 0),
+            func.coalesce(func.sum(Tree.shi_unit), 0),
+        ).group_by(Tree.kind_tree).all()
+        if not rows:
+            continue
+        a = _new_abstract()
+        for kind, trees, cft, shi_unit in rows:
+            _add_to_abstract(a, kind, trees, float(cft), float(shi_unit))
+            _add_to_abstract(grand, kind, trees, float(cft), float(shi_unit))
+        per_beat[beat.name] = _finish_abstract(a)
+    return per_beat, _finish_abstract(grand)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +306,7 @@ def normalize_beat(name):
 def read_tree_form(form, beat, exclude_id=None):
     """Check the form. Returns (error, data); data is ready to save when error is None.
 
+    beat is the Beat whose table the tree goes into (or None if no beat is chosen).
     exclude_id is the tree being edited, so it is not counted as its own duplicate.
     """
     tree_no = " ".join(form.get("tree_no", "").split())
@@ -278,7 +315,7 @@ def read_tree_form(form, beat, exclude_id=None):
     girth_raw = form.get("girth", "").strip()
     remarks = form.get("remarks", "").strip()
 
-    if not beat:
+    if beat is None:
         return "Please set the beat name first.", None
     if not (tree_no and km_burji_no and kind_tree and girth_raw):
         return "Please enter the tree no, km / RD / burji no, select a tree kind and enter the girth.", None
@@ -292,21 +329,16 @@ def read_tree_form(form, beat, exclude_id=None):
     if row is None:
         return f"No data found for {kind_tree} with girth {girth}.", None
 
-    key = {
-        "beat_name": beat,
-        "km_burji_no": km_burji_no,
-        "kind_tree": kind_tree,
-        "tree_no": tree_no,
-    }
-    duplicate = Shisham.query.filter_by(**{col: key[col] for col in UNIQUE_COLUMNS})
+    Tree = tree_model(beat.table_name)
+    key = {"km_burji_no": km_burji_no, "kind_tree": kind_tree, "tree_no": tree_no}
+    duplicate = Tree.query.filter_by(**{col: key[col] for col in UNIQUE_COLUMNS})
     if exclude_id is not None:
-        duplicate = duplicate.filter(Shisham.id != exclude_id)
+        duplicate = duplicate.filter(Tree.id != exclude_id)
     if duplicate.first():
-        return duplicate_message(tree_no, kind_tree, km_burji_no, beat), None
+        return duplicate_message(tree_no, kind_tree, km_burji_no, beat.name), None
 
     return None, {
         "tree_no": tree_no,
-        "beat_name": beat,
         "km_burji_no": km_burji_no,
         "kind_tree": kind_tree,
         "girth": girth,
@@ -317,19 +349,23 @@ def read_tree_form(form, beat, exclude_id=None):
     }
 
 
-def render_index(error=None, form=None, edit_tree=None):
+def render_index(error=None, form=None, edit_tree=None, edit_beat=None):
     """Build the page: one section per beat (current beat first, then A-Z)."""
     current_beat = session.get("beat_name")
 
     abstracts, grand = get_abstracts()
-    by_beat = defaultdict(list)
-    for t in Shisham.query.order_by(Shisham.id.asc()).all():
-        by_beat[t.beat_name].append(t)
-
-    beat_order = sorted(by_beat, key=lambda b: (b != current_beat, b.lower()))
-    sections = [
-        {"beat": b, "trees": by_beat[b], "abstract": abstracts[b]} for b in beat_order
-    ]
+    sections = []
+    for beat in Beat.query.all():
+        if beat.name not in abstracts:
+            continue
+        Tree = tree_model(beat.table_name)
+        sections.append({
+            "id": beat.id,
+            "beat": beat.name,
+            "trees": Tree.query.order_by(Tree.id.asc()).all(),
+            "abstract": abstracts[beat.name],
+        })
+    sections.sort(key=lambda s: (s["beat"] != current_beat, s["beat"].lower()))
 
     return render_template(
         "index.html",
@@ -342,6 +378,7 @@ def render_index(error=None, form=None, edit_tree=None):
         error=error,
         form=form or {},
         edit_tree=edit_tree,
+        edit_beat=edit_beat,
     )
 
 
@@ -350,14 +387,15 @@ def render_index(error=None, form=None, edit_tree=None):
 # ---------------------------------------------------------------------------
 @app.route("/set-beat", methods=["POST"])
 def set_beat():
-    """Choose the beat once. All entries that follow belong to this beat."""
-    beat = normalize_beat(request.form.get("beat_name"))
+    """Choose the beat once. Its own table is created the first time it is used."""
+    name = normalize_beat(request.form.get("beat_name"))
 
-    if not beat:
+    if not name:
         flash("Please pick or type a beat name.", "error")
         return redirect(url_for("index"))
 
-    session["beat_name"] = beat
+    get_or_create_beat(name)
+    session["beat_name"] = name
     return redirect(url_for("index"))
 
 
@@ -367,21 +405,23 @@ def index():
 
     # ----- Add a new tree -----
     if request.method == "POST":
-        error, data = read_tree_form(request.form, current_beat)
+        beat = get_or_create_beat(current_beat) if current_beat else None
+        error, data = read_tree_form(request.form, beat)
 
         if error is None:
-            tree = Shisham(**data)
+            Tree = tree_model(beat.table_name)
+            tree = Tree(**data)
             db.session.add(tree)
             try:
                 db.session.commit()
             except IntegrityError:
                 db.session.rollback()
                 error = duplicate_message(
-                    data["tree_no"], data["kind_tree"], data["km_burji_no"], data["beat_name"]
+                    data["tree_no"], data["kind_tree"], data["km_burji_no"], beat.name
                 )
             else:
                 flash(
-                    f"Saved tree no {tree.tree_no} ({tree.km_burji_no}): "
+                    f"Saved tree no {tree.tree_no} ({tree.km_burji_no}) in {beat.name}: "
                     f"{tree.kind_tree.capitalize()}, girth {tree.girth}, dia {tree.dia}, "
                     f"cft {tree.cft}, shi unit {tree.shi_unit}",
                     "success",
@@ -391,23 +431,29 @@ def index():
 
         return render_index(error=error, form=request.form)
 
-    # ----- Show the page, optionally with one tree loaded for editing (?edit=ID) -----
-    edit_tree = None
+    # ----- Show the page, optionally with one tree loaded for editing (?edit=ID&beat=BEAT_ID) -----
+    edit_tree = edit_beat = None
     edit_id = request.args.get("edit", type=int)
-    if edit_id:
-        edit_tree = db.session.get(Shisham, edit_id)
+    beat_id = request.args.get("beat", type=int)
+    if edit_id and beat_id:
+        edit_beat = db.session.get(Beat, beat_id)
+        if edit_beat:
+            edit_tree = db.session.get(tree_model(edit_beat.table_name), edit_id)
         if edit_tree is None:
             flash("That tree no longer exists.", "error")
             return redirect(url_for("index"))
 
-    return render_index(form=edit_tree.to_dict() if edit_tree else {}, edit_tree=edit_tree)
+    return render_index(
+        form=edit_tree.to_dict() if edit_tree else {}, edit_tree=edit_tree, edit_beat=edit_beat
+    )
 
 
-@app.route("/update/<int:tree_id>", methods=["POST"])
-def update_tree(tree_id):
-    """Save changes to an existing tree. dia, cft and shi unit are worked out again."""
-    tree = db.get_or_404(Shisham, tree_id)
-    beat = normalize_beat(request.form.get("beat_name")) or tree.beat_name
+@app.route("/update/<int:beat_id>/<int:tree_id>", methods=["POST"])
+def update_tree(beat_id, tree_id):
+    """Save changes to a tree in its beat's table. dia, cft and shi unit are worked out again."""
+    beat = db.get_or_404(Beat, beat_id)
+    Tree = tree_model(beat.table_name)
+    tree = db.get_or_404(Tree, tree_id)
 
     error, data = read_tree_form(request.form, beat, exclude_id=tree.id)
 
@@ -419,11 +465,11 @@ def update_tree(tree_id):
         except IntegrityError:
             db.session.rollback()
             error = duplicate_message(
-                data["tree_no"], data["kind_tree"], data["km_burji_no"], data["beat_name"]
+                data["tree_no"], data["kind_tree"], data["km_burji_no"], beat.name
             )
         else:
             flash(
-                f"Updated tree no {tree.tree_no} ({tree.km_burji_no}) in {tree.beat_name}: "
+                f"Updated tree no {tree.tree_no} ({tree.km_burji_no}) in {beat.name}: "
                 f"{tree.kind_tree.capitalize()}, girth {tree.girth}, dia {tree.dia}, "
                 f"cft {tree.cft}, shi unit {tree.shi_unit}",
                 "success",
@@ -431,15 +477,16 @@ def update_tree(tree_id):
             return redirect(url_for("index"))
 
     db.session.rollback()
-    return render_index(error=error, form=request.form, edit_tree=tree)
+    return render_index(error=error, form=request.form, edit_tree=tree, edit_beat=beat)
 
 
-@app.route("/delete/<int:tree_id>", methods=["POST"])
-def delete_tree(tree_id):
-    tree = db.get_or_404(Shisham, tree_id)
+@app.route("/delete/<int:beat_id>/<int:tree_id>", methods=["POST"])
+def delete_tree(beat_id, tree_id):
+    beat = db.get_or_404(Beat, beat_id)
+    tree = db.get_or_404(tree_model(beat.table_name), tree_id)
     label = (
         f"tree no {tree.tree_no} ({tree.kind_tree.capitalize()}, km / burji no "
-        f"{tree.km_burji_no}) from {tree.beat_name}"
+        f"{tree.km_burji_no}) from {beat.name}"
     )
     db.session.delete(tree)
     db.session.commit()
@@ -535,11 +582,6 @@ def write_grand_sheet(ws, grand, per_beat):
 def download_excel():
     """All beats (one sheet each). Use /download-excel?beat=Name for a single beat."""
     only_beat = request.args.get("beat")
-
-    query = Shisham.query
-    if only_beat:
-        query = query.filter_by(beat_name=only_beat)
-    trees = query.order_by(Shisham.beat_name, Shisham.id).all()
     per_beat, grand = get_abstracts(only_beat)
 
     wb = Workbook()
@@ -549,10 +591,12 @@ def download_excel():
     if not beats:
         first_sheet.title = "No Data"
     used = set()
-    for i, beat in enumerate(beats):
+    for i, name in enumerate(beats):
+        Tree = tree_model(get_beat(name).table_name)
+        trees = Tree.query.order_by(Tree.id).all()
         ws = first_sheet if i == 0 else wb.create_sheet()
-        ws.title = safe_sheet_name(beat, used)
-        write_beat_sheet(ws, beat, [t for t in trees if t.beat_name == beat], per_beat[beat])
+        ws.title = safe_sheet_name(name, used)
+        write_beat_sheet(ws, name, trees, per_beat[name])
 
     if len(beats) > 1:
         ws = wb.create_sheet()
@@ -574,54 +618,40 @@ def download_excel():
 
 
 # ---------------------------------------------------------------------------
-# Database repair (runs every time the app starts, safe to run again and again)
-# - adds beat_name / km_burji_no if an older table does not have them
-# - removes the OLD rule "tree no must be unique in the whole table"
-# - adds the NEW rule from UNIQUE_COLUMNS
+# Move trees from the OLD single table ("shisham" or "trees") into the per-beat
+# tables. Runs at start. The old table is renamed to <name>_old_backup, not deleted.
 # ---------------------------------------------------------------------------
-def upgrade_database():
-    if db.engine.dialect.name != "mysql":
-        return
-
+def migrate_old_tables():
     insp = inspect(db.engine)
-    if not insp.has_table("shisham"):
-        return
-
-    existing_cols = {c["name"] for c in insp.get_columns("shisham")}
-    for col, ddl in [("beat_name", "VARCHAR(100) NULL"), ("km_burji_no", "VARCHAR(50) NULL")]:
-        if col not in existing_cols:
-            with db.engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE shisham ADD COLUMN {col} {ddl}"))
-            print(f"[database] added column {col}")
-
-    indexes = insp.get_indexes("shisham")
-
-    # Drop every unique rule that is not the one we want
-    # (this is the old rule that blocked the same tree no in another km).
-    has_new_rule = False
-    for idx in indexes:
-        if not idx.get("unique"):
+    for old in ("shisham", "trees"):
+        if not insp.has_table(old):
             continue
-        cols = list(idx["column_names"])
-        if idx["name"] == UNIQUE_NAME and cols == UNIQUE_COLUMNS:
-            has_new_rule = True
-        elif cols == ["tree_no"] or idx["name"] == UNIQUE_NAME:
+        cols = {c["name"] for c in insp.get_columns(old)}
+        if not {"tree_no", "kind_tree", "girth"} <= cols:
+            continue
+        rows = db.session.execute(text(f"SELECT * FROM `{old}`")).mappings().all()
+        moved = skipped = 0
+        for r in rows:
+            name = " ".join(((r.get("beat_name") if "beat_name" in cols else None) or "Unassigned").split())
+            beat = get_or_create_beat(normalize_beat(name))
+            Tree = tree_model(beat.table_name)
+            db.session.add(Tree(
+                tree_no=r["tree_no"], km_burji_no=r.get("km_burji_no") or "-",
+                kind_tree=r["kind_tree"], girth=r["girth"], dia=r.get("dia"),
+                cft=r.get("cft"), shi_unit=r.get("shi_unit"), remarks=r.get("remarks"),
+            ))
+            try:
+                db.session.commit()
+                moved += 1
+            except IntegrityError:
+                db.session.rollback()
+                skipped += 1
+        backup = f"{old}_old_backup"
+        if not insp.has_table(backup):
             with db.engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE shisham DROP INDEX `{idx['name']}`"))
-            print(f"[database] removed old unique rule `{idx['name']}` on {cols}")
-
-    if not has_new_rule:
-        cols_sql = ", ".join(f"`{c}`" for c in UNIQUE_COLUMNS)
-        try:
-            with db.engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE shisham ADD CONSTRAINT {UNIQUE_NAME} UNIQUE ({cols_sql})"))
-            print(f"[database] added unique rule on {UNIQUE_COLUMNS}")
-        except Exception as exc:  # most likely: duplicates already saved in the same km
-            print(
-                "[database] WARNING: could not add the unique rule, probably because the same "
-                "tree no is already saved twice in one km. Fix those rows, then restart.\n"
-                f"           {exc.__class__.__name__}: {str(exc).splitlines()[0][:200]}"
-            )
+                conn.execute(text(f"ALTER TABLE `{old}` RENAME TO `{backup}`"))
+        print(f"[database] moved {moved} trees from `{old}` into per-beat tables "
+              f"({skipped} skipped as duplicates). Old table kept as `{backup}`.")
 
 
 # ---------------------------------------------------------------------------
@@ -664,14 +694,19 @@ def database_health():
 
 
 # ---------------------------------------------------------------------------
-# Create tables / repair old tables on start (also works under gunicorn)
+# Create tables on start (also works under gunicorn)
 # ---------------------------------------------------------------------------
 def init_database():
     with app.app_context():
         try:
-            db.create_all()
-            upgrade_database()
+            db.create_all()                      # the "beats" list table
+            for beat in Beat.query.all():        # beats saved earlier
+                ensure_table(beat)
+            for name in BEATS:                   # the beats written in BEATS above
+                get_or_create_beat(name)
+            migrate_old_tables()
         except Exception as exc:
+            db.session.rollback()
             print(f"[database] could not initialise: {exc.__class__.__name__}: "
                   f"{str(exc).splitlines()[0][:200]}")
 

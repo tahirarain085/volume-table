@@ -1,9 +1,10 @@
 <!DOCTYPE html>
+{% extends "base.html" %}
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tree Register</title>
+  {% block title %}Tree Register {% endblock title %}
   <!-- Fonts load when online; the page falls back to system fonts when offline -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -171,6 +172,7 @@
   </style>
 </head>
 <body>
+  {% block content %}
 
   <header class="topbar">
     <div class="topbar-inner">
@@ -420,5 +422,6 @@
       update();
     })();
   </script>
+  {% endblock content %}
 </body>
 </html>
